@@ -1,0 +1,22 @@
+[project]
+authors = [
+  {name = "Desearch", email = "support@desearch.ai"},
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "llama-index>=0.12.34",
+  "desearch-py>=1.0.0",
+]
+description = "Llama-index integration with Desearch API for search and data-fetching tools."
+license = {text = "MIT"}
+name = "llama-index-desearch"
+readme = "README.md"
+requires-python = ">=3.7"
+version = "0.0.1"
+
+[project.urls]
+Homepage = "https://github.com/Desearch-ai/llama-index-desearch"
