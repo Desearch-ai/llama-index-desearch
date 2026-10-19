@@ -2,6 +2,14 @@ name: Tests
 
 on:
   pull_request:
+  push:
+    branches:
+      - main
+  # publish.yml calls this workflow so a failing suite blocks the PyPI upload.
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   unit-tests:
