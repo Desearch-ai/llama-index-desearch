@@ -1,5 +1,10 @@
+import asyncio
+import concurrent.futures
+
 from pydantic import BaseModel, Field
-from typing import Optional, List, Literal
+from pydantic.fields import FieldInfo
+from pydantic_core import PydanticUndefined
+from typing import Any, Optional, List, Literal
 from llama_index.core.tools.tool_spec.base import BaseToolSpec
 from desearch_py import Desearch
 
@@ -81,6 +86,49 @@ class WebSearchResult(BaseModel):
     )
 
 
+def _arg(value: Any) -> Any:
+    """Use a Field's default when a spec function is called directly in Python."""
+    if isinstance(value, FieldInfo):
+        default = value.get_default(call_default_factory=True)
+        return None if default is PydanticUndefined else default
+    return value
+
+
+def _to_plain(value: Any) -> Any:
+    """Turn desearch-py's pydantic models into plain dicts and lists, without empty fields."""
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json", exclude_none=True)
+    if isinstance(value, list):
+        return [_to_plain(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _to_plain(item) for key, item in value.items()}
+    return value
+
+
+def _call_desearch(client: Desearch, method: str, **kwargs: Any) -> Any:
+    """Run an async desearch-py method from a sync spec function.
+
+    Each call opens its own client with the key and base URL of ``client``, so
+    its aiohttp session never outlives the event loop it ran on.
+    """
+
+    async def call() -> Any:
+        request_client = Desearch(api_key=client.api_key, base_url=client.base_url)
+        try:
+            return await getattr(request_client, method)(**kwargs)
+        finally:
+            await request_client.close()
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _to_plain(asyncio.run(call()))
+    # Called from inside a running event loop (for example a notebook cell):
+    # run the request on a worker thread's own loop instead.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        return _to_plain(executor.submit(asyncio.run, call()).result())
+
+
 class DesearchToolSpec(BaseToolSpec):
     """Desearch tool spec."""
 
@@ -111,86 +159,104 @@ class DesearchToolSpec(BaseToolSpec):
         ] = Field(description="List of tools to use. Must include at least one tool."),
         model: str = Field(
             default="NOVA",
-            description="The model to use for the search. Value should 'NOVA', 'ORBIT' or 'HORIZON'",
+            description=(
+                "Kept for compatibility: 'NOVA', 'ORBIT' or 'HORIZON'. The current "
+                "Desearch API picks the model itself and ignores this value."
+            ),
         ),
         date_filter: Optional[str] = Field(
-            default=None, description="Date filter for the search."
+            default=None,
+            description=(
+                "Only include results from this window: PAST_24_HOURS, PAST_2_DAYS, "
+                "PAST_WEEK, PAST_2_WEEKS, PAST_MONTH, PAST_2_MONTHS, PAST_YEAR or "
+                "PAST_2_YEARS. Leave empty for no date filter."
+            ),
         ),
     ) -> str | dict:
         """
-        Perform a search using Desearch.
+        Search the web, Hacker News, Reddit, Wikipedia, YouTube, X (Twitter) and arXiv with Desearch AI search.
 
         Args:
             prompt (str): The search prompt or query.
-            tool (List[Literal["web", "hackernews", "reddit", "wikipedia", "youtube", "twitter", "arxiv"]]): List of tools to use. Must include at least one tool.
-            model (str, optional): The model to use for the search. Defaults to "NOVA".
-            date_filter (Optional[str], optional): Date filter for the search. Defaults to None.
+            tool (List[str]): Sources to search. Must include at least one.
+            model (str, optional): Kept for compatibility. The current Desearch API ignores it.
+            date_filter (Optional[str], optional): Date window such as "PAST_WEEK". Defaults to None (no filter).
 
         Returns:
-            str | dict: The search result or an error string.
+            str | dict: The results per source and a summary, or an error string.
         """
         try:
-            result = self.client.search(
-                prompt,
-                tool,
-                model,
-                date_filter,
+            prompt, tool, date_filter = map(_arg, (prompt, tool, date_filter))
+            if not tool:
+                raise ValueError("tool must include at least one source.")
+            # desearch-py has no model argument. date_filter is passed even when
+            # it is None, because desearch-py before 1.3 defaults it to PAST_24_HOURS.
+            return _call_desearch(
+                self.client,
+                "ai_search",
+                prompt=prompt,
+                tools=tool,
+                date_filter=date_filter,
             )
-
-            return result
         except Exception as e:
             return str(e)
 
     def twitter_search_tool(
         self,
-        query: str = Field(description="The Twitter search query."),
-        sort: str = Field(default="Top", description="Sort order for the results."),
-        count: int = Field(default=10, description="Number of results to return."),
-    ) -> BasicTwitterSearchResponse:
+        query: str = Field(description="The X (Twitter) search query."),
+        sort: str = Field(default="Top", description="Sort order: 'Top' or 'Latest'."),
+        count: int = Field(
+            default=10, description="Number of posts to return (1-100)."
+        ),
+    ) -> str | List[dict]:
         """
-        Perform a basic Twitter search using the Exa API.
+        Search posts on X (Twitter) with Desearch.
 
         Args:
-            query (str, optional): The Twitter search query. Defaults to None.
-            sort (str, optional): Sort order for the results. Defaults to "Top".
-            count (int, optional): Number of results to return. Defaults to 10.
+            query (str): The search query.
+            sort (str, optional): "Top" or "Latest". Defaults to "Top".
+            count (int, optional): Number of posts to return (1-100). Defaults to 10.
 
         Returns:
-            BasicTwitterSearchResponse: The search results.
-
-        Raises:
-            Exception: If an error occurs when calling the API.
+            str | List[dict]: Posts with their author and engagement counts, or an error string.
         """
         try:
-            result = self.client.basic_twitter_search(query, sort, count)
-            return result
+            query, sort, count = map(_arg, (query, sort, count))
+            return _call_desearch(
+                self.client, "x_search", query=query, sort=sort, count=count
+            )
         except Exception as e:
             return str(e)
 
     def web_search_tool(
         self,
         query: str = Field(description="The search query."),
-        num: int = Field(default=10, description="Number of results to return."),
-        start: int = Field(
-            default=1, description="The starting index for the search results."
+        num: int = Field(
+            default=10,
+            description="Maximum number of results to return (one page has up to 10).",
         ),
-    ) -> List[WebSearchResult]:
+        start: int = Field(
+            default=1, description="1-based position of the first result, for paging."
+        ),
+    ) -> str | List[dict]:
         """
-        Perform a basic web search using the Exa API.
+        Search the web with Desearch.
 
         Args:
-            query (str, optional): The search query. Defaults to None.
-            num (int, optional): Number of results to return. Defaults to 10.
-            start (int, optional): The starting index for the search results. Defaults to 1.
+            query (str): The search query.
+            num (int, optional): Maximum number of results to return. Defaults to 10.
+            start (int, optional): 1-based position of the first result. Defaults to 1.
 
         Returns:
-            List[WebSearchResult]: The search results.
-
-        Raises:
-            Exception: If an error occurs when calling the API.
+            str | List[dict]: Results with title, link and snippet, or an error string.
         """
         try:
-            result = self.client.basic_web_search(query, num, start)
-            return result
+            query, num, start = map(_arg, (query, num, start))
+            # web_search takes a 0-based skip offset and returns one page of
+            # results; it has no result-count argument.
+            page = _call_desearch(
+                self.client, "web_search", query=query, start=max(start - 1, 0)
+            )
+            return page["data"][:num]
         except Exception as e:
             return str(e)
