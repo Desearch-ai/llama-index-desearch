@@ -9,15 +9,14 @@ classifiers = [
 ]
 dependencies = [
   "llama-index>=0.12.34",
-  "desearch-py>=1.1.0,<2.0.0",
-  "requests>=2.31.0",
+  "desearch-py>=1.8.0,<2.0.0",
 ]
 description = "Llama-index integration with Desearch API for search and data-fetching tools."
 license = {text = "MIT"}
 name = "llama-index-desearch"
 readme = "README.md"
-requires-python = ">=3.7"
-version = "0.1.0"
+requires-python = ">=3.10"
+version = "0.2.0"
 
 [project.urls]
 Homepage = "https://github.com/Desearch-ai/llama-index-desearch"

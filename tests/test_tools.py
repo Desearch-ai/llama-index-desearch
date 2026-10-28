@@ -1,4 +1,4 @@
-"""AI, X and web search spec functions, tested against a local HTTP server (never the live API).
+"""Spec functions tested end to end against a local HTTP server (never the live API).
 
 The real desearch-py client sends each request; only its base URL points at the test server.
 """
@@ -56,8 +56,8 @@ class _FakeDesearchAPI:
         self.lock = threading.Lock()
         self.base_url = ""
 
-    def add(self, method, path, status, payload):
-        self.routes[(method, path)] = (status, payload)
+    def add(self, method, path, status, payload, headers=None):
+        self.routes[(method, path)] = (status, payload, headers or {})
 
     def respond(self, method, path, query, headers, body):
         with self.lock:
@@ -70,7 +70,7 @@ class _FakeDesearchAPI:
                     "json": body,
                 }
             )
-            return self.routes.get((method, path), (404, {"detail": "Not Found"}))
+            return self.routes.get((method, path), (404, {"detail": "Not Found"}, {}))
 
 
 def _handler(api):
@@ -79,7 +79,7 @@ def _handler(api):
             url = urlsplit(self.path)
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length) if length else b""
-            status, payload = api.respond(
+            status, payload, headers = api.respond(
                 self.command,
                 url.path,
                 dict(parse_qsl(url.query)),
@@ -90,6 +90,8 @@ def _handler(api):
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
+            for name, value in headers.items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(data)
 
@@ -262,9 +264,7 @@ def test_http_errors_are_returned_as_text_without_the_api_key(
 
     result = getattr(spec, function)(**kwargs)
 
-    assert isinstance(result, str)
-    assert result.startswith("401")
-    assert "test-key" not in result
+    assert result == "HTTP 401: Invalid API key"
 
 
 def test_unreachable_api_is_returned_as_text():
@@ -273,5 +273,70 @@ def test_unreachable_api_is_returned_as_text():
 
     result = tool_spec.web_search_tool(query="Bittensor")
 
-    assert isinstance(result, str)
+    assert result.startswith("Could not reach Desearch")
     assert "test-key" not in result
+
+
+def test_social_list_action_returns_the_next_cursor_header(spec, desearch_api):
+    desearch_api.add(
+        "GET",
+        "/desearch/tiktok/hashtag/ai",
+        200,
+        [{"id": "7620891413932166433", "text": "AI"}],
+        headers={"x-desearch-next-cursor": "eyJwIjoyfQ=="},
+    )
+
+    first = spec.tiktok_tool(action="hashtag", tag="#ai", count=1)
+    spec.tiktok_tool(action="hashtag", tag="ai", count=1, cursor=first["next_cursor"])
+
+    assert first["next_cursor"] == "eyJwIjoyfQ=="
+    assert [post["id"] for post in first["results"]] == ["7620891413932166433"]
+    assert [r["query"] for r in desearch_api.requests] == [
+        {"count": "1"},
+        {"count": "1", "cursor": "eyJwIjoyfQ=="},
+    ]
+    assert desearch_api.requests[0]["headers"]["Authorization"] == "test-key"
+
+
+def test_social_search_sends_the_cursor_in_the_body(spec, desearch_api):
+    desearch_api.add("POST", "/desearch/facebook/search", 200, [])
+
+    result = spec.facebook_tool(action="search", query="running", count=2, cursor="c2")
+
+    # No x-desearch-next-cursor header: this was the last page.
+    assert result == {"results": [], "next_cursor": None}
+    assert desearch_api.requests[0]["json"] == {
+        "query": "running",
+        "count": 2,
+        "cursor": "c2",
+    }
+
+
+def test_social_object_action_encodes_a_url_id_as_one_path_segment(spec, desearch_api):
+    # The slashes stay encoded (%2F), so the URL is one path segment; yarl leaves ":" as is.
+    path = "/desearch/instagram/media/https:%2F%2Fwww.instagram.com%2Fp%2FDY79rTVS6OK%2F"
+    desearch_api.add("GET", path, 200, {"id": "1", "shortcode": "DY79rTVS6OK"})
+
+    result = spec.instagram_tool(
+        action="post", id="https://www.instagram.com/p/DY79rTVS6OK/"
+    )
+
+    assert result["shortcode"] == "DY79rTVS6OK"
+    assert desearch_api.requests[0]["path"] == path
+
+
+def test_extract_returns_the_page_text(spec, desearch_api):
+    desearch_api.add("GET", "/web/extract", 200, "Example Domain")
+
+    result = spec.extract_tool(url="https://example.com")
+
+    assert result == {
+        "url": "https://example.com",
+        "format": "text",
+        "content": '"Example Domain"',
+    }
+    assert desearch_api.requests[0]["query"] == {
+        "url": "https://example.com",
+        "format": "text",
+        "js": "false",
+    }

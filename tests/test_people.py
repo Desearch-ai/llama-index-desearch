@@ -1,9 +1,11 @@
-"""People Search tool spec functions, tested against a local HTTP server (never the live API)."""
+"""People Search tool spec functions, tested against a local HTTP server (never the live API).
+
+The real desearch-py client sends each request; only its base URL points at the test server.
+"""
 
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
 import pytest
@@ -11,7 +13,6 @@ import pytest
 from llama_index_desearch.people import compact_person
 from llama_index_desearch.tools import DesearchToolSpec
 
-ROOT = Path(__file__).resolve().parents[1]
 TASK_ID = "5b33f3ee-168b-4780-9c8e-63a626781872"
 TASK_PATH = f"/desearch/people/tasks/{TASK_ID}"
 
@@ -160,7 +161,7 @@ def people_api():
 @pytest.fixture
 def spec(people_api):
     tool_spec = DesearchToolSpec(api_key="test-key")
-    tool_spec.base_url = people_api.base_url
+    tool_spec.client.base_url = people_api.base_url
     tool_spec.poll_interval = 0.01
     return tool_spec
 
@@ -171,13 +172,7 @@ def _tools(tool_spec):
 
 def test_people_functions_are_listed_with_short_descriptions():
     tools = _tools(DesearchToolSpec(api_key="test-key"))
-    assert list(tools) == [
-        "ai_search_tool",
-        "twitter_search_tool",
-        "web_search_tool",
-        "people_search_tool",
-        "people_profiles_tool",
-    ]
+    assert list(tools)[3:5] == ["people_search_tool", "people_profiles_tool"]
     for tool in tools.values():
         # OpenAI rejects tool descriptions over 1024 characters.
         tool.metadata.to_openai_tool()
@@ -192,18 +187,6 @@ def test_people_functions_are_listed_with_short_descriptions():
     assert params["platform"]["anyOf"][0]["enum"] == ["x", "youtube", "linkedin", "tiktok"]
     assert params["count"]["default"] == 25
     assert "verified_only" in params["filters"]["description"]
-
-
-def test_package_metadata():
-    pyproject = (ROOT / "pyproject.toml").read_text()
-    setup_py = (ROOT / "setup.py").read_text()
-    assert 'version = "0.1.0"' in pyproject
-    assert 'version="0.1.0"' in setup_py
-    for text in (pyproject, setup_py):
-        # People Search must not need the unpublished desearch-py 1.4.0.
-        assert "desearch-py>=1.1.0,<2.0.0" in text
-        assert "desearch-py>=1.4" not in text
-        assert "requests>=" in text
 
 
 def test_people_search_tool_call_starts_waits_and_returns_compact_people(
@@ -333,15 +316,19 @@ def test_people_search_reads_every_results_page(spec, people_api):
     ]
 
 
-def test_idempotent_replay_is_marked(spec, people_api):
-    people_api.add("POST", "/desearch/people/search/x", 200, _task("completed"))
-    people_api.add("GET", f"{TASK_PATH}/results", 200, _results([]))
+def test_idempotent_replay_returns_the_first_search(spec, people_api):
+    # The API answers a reused Idempotency-Key with HTTP 200 and the first task.
+    people_api.add("POST", "/desearch/people/search/x", 200, _task("completed", 1))
+    people_api.add("GET", f"{TASK_PATH}/results", 200, _results([PERSON_X_2]))
 
     result = spec.people_search_tool(
         query="Indie hackers", platform="x", idempotency_key="same-key"
     )
 
-    assert result["existing_task"] is True
+    assert result["task_id"] == TASK_ID
+    assert result["status"] == "completed"
+    (create,) = people_api.calls("POST")
+    assert create["headers"]["Idempotency-Key"] == "same-key"
 
 
 @pytest.mark.parametrize(
@@ -386,7 +373,7 @@ def test_http_errors_are_returned_without_the_api_key(spec, people_api):
 
 def test_unreachable_api_is_returned_as_an_error(people_api):
     tool_spec = DesearchToolSpec(api_key="test-key")
-    tool_spec.base_url = "http://127.0.0.1:9"
+    tool_spec.client.base_url = "http://127.0.0.1:9"
 
     result = tool_spec.people_profiles_tool(platform="x")
 

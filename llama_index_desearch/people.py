@@ -1,26 +1,30 @@
-"""People Search on the Desearch API (``/desearch/people/*``).
+"""People Search on the Desearch API, through the desearch-py client.
 
-desearch-py adds People Search methods in 1.4.0, which is not on PyPI yet, so
-this module calls the routes directly with requests and the same
-``Authorization: <api key>`` header the SDK sends. Switch the tool spec to the
-SDK methods once desearch-py 1.4.0 is published.
-
-- ``POST /desearch/people/search/{platform}`` starts a background search and is
-  billed: it reserves ``count`` profiles at the route price and settles to the
-  profiles it delivers. A search that finds no one is free.
+- Starting a search (``x_profile_search``, ``youtube_creator_search``,
+  ``linkedin_profile_search``, ``tiktok_creator_search``) is billed: it reserves
+  ``count`` profiles at the route price and settles to the profiles it
+  delivers. A search that finds no one is free.
 - Reading a task, its results and the profiles library is free.
+
+The functions here are coroutines that take a ``desearch_py.Desearch`` client;
+``DesearchToolSpec`` runs them like its other functions. Arguments are checked
+before the billed call, so a bad filter is never charged.
 """
 
-import json
-import time
+import asyncio
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote
 
-import requests
-
-PEOPLE_API_BASE_URL = "https://api.desearch.ai"
+from desearch_py import Desearch
 
 PEOPLE_PLATFORMS = ("x", "youtube", "linkedin", "tiktok")
+
+# desearch-py method that starts a search on each platform.
+PEOPLE_SEARCH_METHODS: Dict[str, str] = {
+    "x": "x_profile_search",
+    "youtube": "youtube_creator_search",
+    "linkedin": "linkedin_profile_search",
+    "tiktok": "tiktok_creator_search",
+}
 
 # Statuses after which a task never changes again.
 PEOPLE_ENDED_STATUSES = frozenset(
@@ -68,130 +72,18 @@ PEOPLE_SEARCH_FILTERS: Dict[str, Tuple[str, ...]] = {
     ),
 }
 
-_REQUEST_TIMEOUT_SECONDS = 120
 _RESULTS_PAGE_SIZE = 200
 _MAX_RESULT_PAGES = 25
 
 
-class DesearchPeopleError(Exception):
-    """An HTTP error from a People Search route. The message never holds the API key."""
-
-    def __init__(self, status: Optional[int], detail: str) -> None:
-        self.status = status
-        self.detail = detail
-        super().__init__(f"HTTP {status}: {detail}" if status else detail)
-
-
-def _error_detail(data: Any, text: str) -> str:
-    if isinstance(data, dict) and data.get("detail") is not None:
-        detail = data["detail"]
-        if not isinstance(detail, str):
-            detail = json.dumps(detail)
-        task = data.get("task")
-        if isinstance(task, dict) and isinstance(task.get("status"), str):
-            return f"{detail} Task status: {task['status']}."
-        return detail
-    return text if len(text) <= 500 else f"{text[:500]}..."
-
-
-class PeopleClient:
-    """Minimal client for the People Search routes."""
-
-    def __init__(
-        self,
-        api_key: str,
-        base_url: str = PEOPLE_API_BASE_URL,
-        session: Optional[requests.Session] = None,
-    ) -> None:
-        self._api_key = api_key
-        self._base_url = base_url.rstrip("/")
-        self._owns_session = session is None
-        self._session = session or requests.Session()
-
-    def __enter__(self) -> "PeopleClient":
-        return self
-
-    def __exit__(self, *exc_info: Any) -> None:
-        self.close()
-
-    def close(self) -> None:
-        if self._owns_session:
-            self._session.close()
-
-    def _call(
-        self,
-        method: str,
-        path: str,
-        *,
-        params: Optional[Dict[str, Any]] = None,
-        body: Optional[Dict[str, Any]] = None,
-        headers: Optional[Dict[str, str]] = None,
-    ) -> Tuple[int, Any]:
-        request_headers = {"Authorization": self._api_key}
-        if headers:
-            request_headers.update(headers)
-        try:
-            response = self._session.request(
-                method,
-                f"{self._base_url}{path}",
-                params=params,
-                json=body,
-                headers=request_headers,
-                timeout=_REQUEST_TIMEOUT_SECONDS,
-            )
-        except requests.RequestException as exc:
-            # Keep only the exception type and message: no request headers.
-            raise DesearchPeopleError(
-                None, f"Could not reach Desearch ({type(exc).__name__}: {exc})"
-            ) from None
-        text = response.text
-        data: Any = text
-        if text:
-            try:
-                data = json.loads(text)
-            except ValueError:
-                pass
-        if response.status_code >= 400:
-            raise DesearchPeopleError(response.status_code, _error_detail(data, text))
-        return response.status_code, data
-
-    @staticmethod
-    def _task_path(task_id: str, suffix: str = "") -> str:
-        return f"/desearch/people/tasks/{quote(str(task_id), safe='')}{suffix}"
-
-    def start_search(
-        self,
-        platform: str,
-        body: Dict[str, Any],
-        idempotency_key: Optional[str] = None,
-    ) -> Tuple[int, Dict[str, Any]]:
-        """Start a billed search. Returns the HTTP status (202 new, 200 replayed) and the task."""
-        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
-        return self._call(
-            "POST",
-            f"/desearch/people/search/{quote(platform, safe='')}",
-            body=body,
-            headers=headers,
-        )
-
-    def get_task(self, task_id: str) -> Dict[str, Any]:
-        _, data = self._call("GET", self._task_path(task_id))
-        return data
-
-    def get_results(
-        self, task_id: str, cursor: Optional[str] = None, limit: Optional[int] = None
-    ) -> Dict[str, Any]:
-        params = _drop_none({"cursor": cursor, "limit": limit})
-        _, data = self._call("GET", self._task_path(task_id, "/results"), params=params)
-        return data
-
-    def list_profiles(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        _, data = self._call("GET", "/desearch/people/profiles", params=params)
-        return data
-
-
 def _drop_none(values: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in values.items() if value is not None}
+
+
+def _plain(value: Any) -> Any:
+    """A desearch-py model as a plain dict (or the value itself)."""
+    dump = getattr(value, "model_dump", None)
+    return dump(mode="json", exclude_none=True) if callable(dump) else value
 
 
 def people_search_body(
@@ -202,7 +94,7 @@ def people_search_body(
     exclude: Optional[List[str]] = None,
     **filters: Any,
 ) -> Dict[str, Any]:
-    """Build the request body. Raises ValueError for a filter the platform does not accept."""
+    """Build the search arguments. Raises ValueError for a filter the platform does not accept."""
     if platform not in PEOPLE_SEARCH_FILTERS:
         raise ValueError(
             f"Unknown platform {platform!r}. Use one of: {', '.join(PEOPLE_PLATFORMS)}."
@@ -243,26 +135,14 @@ def profile_filter_params(
     location: Optional[str] = None,
     verified: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    """Query parameters for ``GET /desearch/people/profiles``."""
+    """Checked keyword arguments for ``Desearch.list_people_profiles``."""
     if platform not in PEOPLE_PLATFORMS:
         raise ValueError(
             f"Unknown platform {platform!r}. Use one of: {', '.join(PEOPLE_PLATFORMS)}."
         )
     if sort is not None and sort not in PEOPLE_PROFILE_SORTS:
         raise ValueError(f"sort must be one of: {', '.join(PEOPLE_PROFILE_SORTS)}.")
-    params = _drop_none(
-        {
-            "platform": platform,
-            "q": q,
-            "sort": sort,
-            "limit": limit,
-            "cursor": cursor,
-            "min_audience": min_audience,
-            "max_audience": max_audience,
-            "min_score": min_score,
-            "location": location,
-        }
-    )
+    channels: Optional[List[str]] = None
     if has:
         if isinstance(has, str):
             has = has.split(",")
@@ -273,11 +153,21 @@ def profile_filter_params(
                 f"Unknown has channel(s): {', '.join(unknown)}. "
                 f"Use: {', '.join(PEOPLE_CHANNELS)}."
             )
-        if channels:
-            params["has"] = ",".join(channels)
-    if verified is not None:
-        params["verified"] = "true" if verified else "false"
-    return params
+    return _drop_none(
+        {
+            "platform": platform,
+            "q": q,
+            "sort": sort,
+            "limit": limit,
+            "cursor": cursor,
+            "has": channels or None,
+            "min_audience": min_audience,
+            "max_audience": max_audience,
+            "min_score": min_score,
+            "location": location,
+            "verified": verified,
+        }
+    )
 
 
 def _obj(value: Any) -> Dict[str, Any]:
@@ -309,7 +199,7 @@ def _compact(fields: Dict[str, Any]) -> Dict[str, Any]:
 
 def compact_person(person: Any) -> Dict[str, Any]:
     """One person as an agent needs them: who, audience, fit, why, and how to reach them."""
-    p = _obj(person)
+    p = _obj(_plain(person))
     metrics = _obj(p.get("metrics"))
     attributes = _obj(p.get("attributes"))
     score = _obj(p.get("score"))
@@ -369,7 +259,7 @@ def compact_person(person: Any) -> Dict[str, Any]:
 
 def compact_task(task: Any) -> Dict[str, Any]:
     """Task fields an agent needs: status, progress counts and cost."""
-    t = _obj(task)
+    t = _obj(_plain(task))
     status = t.get("status")
     return _compact(
         {
@@ -422,12 +312,18 @@ def people_next_step(status: Optional[str], task_id: Optional[str], tool_name: s
     )
 
 
-def read_all_results(client: PeopleClient, task_id: str) -> List[Dict[str, Any]]:
+async def read_all_results(client: Desearch, task_id: str) -> List[Dict[str, Any]]:
     """Read every person a task has found so far, following the cursor."""
     people: List[Dict[str, Any]] = []
     cursor: Optional[str] = None
     for _ in range(_MAX_RESULT_PAGES):
-        page = _obj(client.get_results(task_id, cursor=cursor, limit=_RESULTS_PAGE_SIZE))
+        page = _obj(
+            _plain(
+                await client.get_people_results(
+                    task_id=task_id, cursor=cursor, limit=_RESULTS_PAGE_SIZE
+                )
+            )
+        )
         results = _list(page.get("results"))
         people.extend(results)
         cursor = page.get("next_cursor")
@@ -436,8 +332,8 @@ def read_all_results(client: PeopleClient, task_id: str) -> List[Dict[str, Any]]
     return people
 
 
-def search_people(
-    client: PeopleClient,
+async def search_people(
+    client: Desearch,
     *,
     tool_name: str,
     timeout: float,
@@ -448,47 +344,43 @@ def search_people(
     idempotency_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Start a search (or pick up ``task_id``), wait up to ``timeout`` seconds, return compact people."""
-    replayed = False
     if task_id:
-        task = _obj(client.get_task(task_id))
+        task = _obj(_plain(await client.get_people_task(task_id=task_id)))
     else:
         if platform is None or body is None:
             raise ValueError("platform and body are required to start a People Search.")
-        http_status, created = client.start_search(platform, body, idempotency_key)
-        task = _obj(created)
-        # 200 means this Idempotency-Key already created the task; nothing new was charged.
-        replayed = http_status == 200
+        start = getattr(client, PEOPLE_SEARCH_METHODS[platform])
+        task = _obj(_plain(await start(**body, idempotency_key=idempotency_key)))
         task_id = task.get("task_id")
         if not task_id:
-            raise DesearchPeopleError(http_status, "The response did not include a task_id.")
+            raise ValueError("The response did not include a task_id.")
 
-    deadline = time.monotonic() + max(float(timeout), 0.0)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(float(timeout), 0.0)
     while task.get("status") not in PEOPLE_ENDED_STATUSES:
-        remaining = deadline - time.monotonic()
+        remaining = deadline - loop.time()
         if remaining <= 0:
             break
-        time.sleep(min(poll_interval, remaining))
-        task = _obj(client.get_task(task_id))
+        await asyncio.sleep(min(poll_interval, remaining))
+        task = _obj(_plain(await client.get_people_task(task_id=task_id)))
 
-    people = read_all_results(client, task_id)
+    people = await read_all_results(client, task_id)
     output = compact_task(task)
     output.setdefault("task_id", task_id)
-    if replayed:
-        output["existing_task"] = True
     output["people"] = [compact_person(person) for person in people]
     output["next_step"] = people_next_step(task.get("status"), task_id, tool_name)
     return output
 
 
-def list_people_profiles(
-    client: PeopleClient, *, tool_name: str, **filters: Any
+async def list_people_profiles(
+    client: Desearch, *, tool_name: str, **filters: Any
 ) -> Dict[str, Any]:
     """One page of the profiles library, compacted."""
-    platform = filters.get("platform")
-    page = _obj(client.list_profiles(profile_filter_params(**filters)))
+    params = profile_filter_params(**filters)
+    page = _obj(_plain(await client.list_people_profiles(**params)))
     next_cursor = page.get("next_cursor")
     output: Dict[str, Any] = {
-        "platform": platform,
+        "platform": params["platform"],
         "total": page.get("total"),
         "people": [compact_person(person) for person in _list(page.get("profiles"))],
     }
