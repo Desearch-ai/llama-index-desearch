@@ -5,6 +5,14 @@ from typing import Any, Dict, Optional, List, Literal, Union
 from llama_index.core.tools.tool_spec.base import BaseToolSpec
 from desearch_py import Desearch
 
+from llama_index_desearch.companies import (
+    CompanyClient,
+    company_enrich_body,
+    company_search_body,
+    control_company_task,
+    list_company_tasks,
+    run_company_task,
+)
 from llama_index_desearch.people import (
     PEOPLE_API_BASE_URL,
     PeopleClient,
@@ -92,6 +100,34 @@ class WebSearchResult(BaseModel):
 
 
 PeoplePlatform = Literal["x", "youtube", "linkedin", "tiktok"]
+CompanyTaskType = Literal["search", "enrich"]
+CompanyTaskAction = Literal["pause", "resume", "cancel"]
+
+_COMPANY_ROLES_DESCRIPTION = (
+    "Leaders to find: ceo, founder, cto, cfo, coo, cmo, president, owner, "
+    "managing_director. Default ceo, founder, cto, cfo."
+)
+_COMPANY_INFER_DESCRIPTION = (
+    "Guess leaders' emails from the company's address pattern (default true). "
+    "Inferred emails say source 'inferred' and have a confidence."
+)
+_COMPANY_VERIFY_DESCRIPTION = "Check every email: syntax, mail server and web (default true)."
+_COMPANY_METADATA_DESCRIPTION = (
+    "Your own labels for the task, e.g. {'campaign': 'q4-outbound'}: up to 10 keys of "
+    "1-40 characters (a-z, 0-9, '_', '.', '-'), string values up to 200 characters."
+)
+_COMPANY_IDEMPOTENCY_DESCRIPTION = (
+    "Any unique string. Sending the same key again returns the first task instead of "
+    "starting and billing a new one."
+)
+_COMPANY_TIMEOUT_DESCRIPTION = (
+    "Seconds to wait for the task to finish (0-1800). If it is still running, the "
+    "companies delivered so far are returned with the task_id."
+)
+_COMPANY_TASK_ID_DESCRIPTION = (
+    "task_id of an earlier Company Search or Company Enrich task. Waits on it and "
+    "returns its companies instead of starting a new task. Free."
+)
 PeopleChannel = Literal[
     "email", "website", "x", "linkedin", "instagram", "youtube", "tiktok"
 ]
@@ -114,13 +150,18 @@ class DesearchToolSpec(BaseToolSpec):
         "web_search_tool",
         "people_search_tool",
         "people_profiles_tool",
+        "company_search_tool",
+        "company_enrich_tool",
+        "company_tasks_tool",
+        "company_task_control_tool",
     ]
 
     def __init__(self, api_key: str) -> None:
         """Initialize with parameters."""
 
         self.client = Desearch(api_key=api_key)
-        # People Search calls the API over HTTP until desearch-py 1.4.0 is on PyPI.
+        # People Search and Company Search call the API over HTTP until desearch-py
+        # 1.4.0 (People Search) and 1.8.0 (Company Search) are on PyPI.
         self.api_key = api_key
         self.base_url = PEOPLE_API_BASE_URL
         self.poll_interval = 5.0
@@ -416,3 +457,282 @@ class DesearchToolSpec(BaseToolSpec):
             return list_people_profiles(
                 client, tool_name="people_profiles_tool", **filters
             )
+
+    def company_search_tool(
+        self,
+        query: Optional[str] = Field(
+            default=None,
+            description=(
+                "The companies to find, in plain language: what they do, where, how far "
+                "along, e.g. 'Series A fintech startups in Berlin building payment "
+                "infrastructure' (3-1000 characters). Required unless task_id is set."
+            ),
+        ),
+        count: int = Field(
+            default=25,
+            description=(
+                "How many companies to deliver (5-200). The task reserves this many and "
+                "bills only the companies it delivers."
+            ),
+        ),
+        min_score: Optional[int] = Field(
+            default=None,
+            description="Only deliver companies with at least this fit score (0-100).",
+        ),
+        exclude: Optional[List[str]] = Field(
+            default=None,
+            description="Domains or URLs to leave out, e.g. companies you already contacted (up to 1000).",
+        ),
+        countries: Optional[List[str]] = Field(
+            default=None,
+            description="Where the companies should be: ISO codes or names, e.g. ['DE', 'Austria'] (up to 20).",
+        ),
+        require: Optional[List[str]] = Field(
+            default=None,
+            description=(
+                "Only deliver companies that have all of these: email, phone, linkedin "
+                "(the company's LinkedIn page), leader (one of roles), leader_email. A "
+                "company without them is not delivered or billed."
+            ),
+        ),
+        roles: Optional[List[str]] = Field(
+            default=None, description=_COMPANY_ROLES_DESCRIPTION
+        ),
+        infer_emails: Optional[bool] = Field(
+            default=None, description=_COMPANY_INFER_DESCRIPTION
+        ),
+        verify_emails: Optional[bool] = Field(
+            default=None, description=_COMPANY_VERIFY_DESCRIPTION
+        ),
+        metadata: Optional[Dict[str, str]] = Field(
+            default=None, description=_COMPANY_METADATA_DESCRIPTION
+        ),
+        idempotency_key: Optional[str] = Field(
+            default=None, description=_COMPANY_IDEMPOTENCY_DESCRIPTION
+        ),
+        timeout: int = Field(default=300, description=_COMPANY_TIMEOUT_DESCRIPTION),
+        task_id: Optional[str] = Field(
+            default=None, description=_COMPANY_TASK_ID_DESCRIPTION
+        ),
+    ) -> Union[dict, str]:
+        """
+        Find companies matching a plain-language description, with public contacts and leaders.
+
+        BILLED: reserves `count` companies; you pay only for those delivered (at least 2 if any),
+        and a task that delivers none is free. SLOW: runs for minutes. Waits up to `timeout`
+        seconds, then returns the companies so far with the task_id. Call again with only task_id
+        to keep waiting (free; starts no new task).
+
+        Returns:
+            dict | str: Task status, cost and companies (score, why, emails, phones, socials,
+            leaders), or an error string.
+        """
+        try:
+            query, count, min_score, exclude = map(_arg, (query, count, min_score, exclude))
+            countries, require, roles = map(_arg, (countries, require, roles))
+            infer_emails, verify_emails, metadata = map(
+                _arg, (infer_emails, verify_emails, metadata)
+            )
+            idempotency_key, timeout, task_id = map(_arg, (idempotency_key, timeout, task_id))
+            body = None
+            if not task_id:
+                if not query:
+                    raise ValueError(
+                        "Set query to start a Company Search, or task_id to keep waiting on one."
+                    )
+                body = company_search_body(
+                    query,
+                    count=count,
+                    min_score=min_score,
+                    exclude=exclude,
+                    countries=countries,
+                    require=require,
+                    roles=roles,
+                    infer_emails=infer_emails,
+                    verify_emails=verify_emails,
+                    metadata=metadata,
+                )
+            return self._company_task(
+                "company_search_tool", "search", body, idempotency_key, timeout, task_id
+            )
+        except Exception as e:
+            return str(e)
+
+    def company_enrich_tool(
+        self,
+        domains: Optional[List[str]] = Field(
+            default=None,
+            description=(
+                "1-200 company domains or URLs, e.g. ['acme.com', 'https://www.beta.io/about']. "
+                "Each is reduced to its host without www.; duplicates are removed. Required "
+                "unless task_id is set."
+            ),
+        ),
+        roles: Optional[List[str]] = Field(
+            default=None, description=_COMPANY_ROLES_DESCRIPTION
+        ),
+        infer_emails: Optional[bool] = Field(
+            default=None, description=_COMPANY_INFER_DESCRIPTION
+        ),
+        verify_emails: Optional[bool] = Field(
+            default=None, description=_COMPANY_VERIFY_DESCRIPTION
+        ),
+        metadata: Optional[Dict[str, str]] = Field(
+            default=None, description=_COMPANY_METADATA_DESCRIPTION
+        ),
+        idempotency_key: Optional[str] = Field(
+            default=None, description=_COMPANY_IDEMPOTENCY_DESCRIPTION
+        ),
+        timeout: int = Field(default=300, description=_COMPANY_TIMEOUT_DESCRIPTION),
+        task_id: Optional[str] = Field(
+            default=None, description=_COMPANY_TASK_ID_DESCRIPTION
+        ),
+    ) -> Union[dict, str]:
+        """
+        Collect public contacts and leaders for companies you already know, by domain.
+
+        One company per domain with the same fields as company_search_tool and no fit score
+        (score is None). BILLED: reserves one company per domain at the Company Enrich price; you pay
+        only for companies delivered (at least 1), and a task that delivers none is free. SLOW: runs
+        for minutes. Waits up to `timeout` seconds, then returns the companies delivered so far with
+        the task_id. Call again with only task_id to keep waiting (free; starts no new task).
+
+        Returns:
+            dict | str: Task status, cost and compact companies, or an error string.
+        """
+        try:
+            domains, roles, infer_emails = map(_arg, (domains, roles, infer_emails))
+            verify_emails, metadata = _arg(verify_emails), _arg(metadata)
+            idempotency_key, timeout, task_id = map(_arg, (idempotency_key, timeout, task_id))
+            body = None
+            if not task_id:
+                if not domains:
+                    raise ValueError(
+                        "Set domains to start a Company Enrich, or task_id to keep waiting on one."
+                    )
+                body = company_enrich_body(
+                    domains,
+                    roles=roles,
+                    infer_emails=infer_emails,
+                    verify_emails=verify_emails,
+                    metadata=metadata,
+                )
+            return self._company_task(
+                "company_enrich_tool", "enrich", body, idempotency_key, timeout, task_id
+            )
+        except Exception as e:
+            return str(e)
+
+    def company_tasks_tool(
+        self,
+        type: Optional[CompanyTaskType] = Field(
+            default=None,
+            description="Only Company Search ('search') or only Company Enrich ('enrich') tasks.",
+        ),
+        status: Optional[List[str]] = Field(
+            default=None,
+            description=(
+                "Only tasks in these statuses, e.g. ['running', 'paused']: queued, running, "
+                "pausing, paused, cancelling, completed, partial, failed, cancelled, expired."
+            ),
+        ),
+        limit: int = Field(default=20, description="Tasks per page (1-100)."),
+        cursor: Optional[str] = Field(
+            default=None,
+            description="next_cursor from the previous page. Keep the same filters when you page.",
+        ),
+        metadata: Optional[Dict[str, str]] = Field(
+            default=None,
+            description="Only tasks whose metadata has all of these labels (exact match, up to 3).",
+        ),
+    ) -> Union[dict, str]:
+        """
+        List your Company Search and Company Enrich tasks, newest first.
+
+        Each task has its status, counts, cost, why it stopped (completion_reason, coverage_limited),
+        warnings and metadata labels. Use it to find a task_id, then read the task's companies with
+        company_search_tool or company_enrich_tool and only task_id. Free and instant: it never
+        starts a task. People Search tasks are not listed.
+
+        Returns:
+            dict | str: tasks and next_cursor, or an error string.
+        """
+        try:
+            filters = {
+                "type": _arg(type),
+                "status": _arg(status),
+                "limit": _arg(limit),
+                "cursor": _arg(cursor),
+                "metadata": _arg(metadata),
+            }
+            if not 1 <= filters["limit"] <= 100:
+                raise ValueError("limit must be between 1 and 100.")
+            with CompanyClient(self.api_key, self.base_url) as client:
+                return list_company_tasks(
+                    client, tool_name="company_tasks_tool", **filters
+                )
+        except Exception as e:
+            return str(e)
+
+    def company_task_control_tool(
+        self,
+        task_id: str = Field(
+            description="task_id of a Company Search or Company Enrich task."
+        ),
+        action: CompanyTaskAction = Field(
+            description=(
+                "pause (a running task finishes its current batch first), resume (no new "
+                "charge) or cancel (stops it for good; cannot be undone)."
+            )
+        ),
+    ) -> Union[dict, str]:
+        """
+        Pause, resume or cancel a Company Search or Company Enrich task and return its status.
+
+        Free: it charges and refunds nothing by itself. Pause keeps the companies delivered so far and
+        the reservation; a task paused for more than 7 days is cancelled. Resume continues with no
+        new charge. Cancel stops it for good: you pay only for the companies already delivered and
+        the rest of the reservation is returned. Cancel cannot be undone.
+
+        Returns:
+            dict | str: The task's updated status, or an error string.
+        """
+        try:
+            task_id, action = _arg(task_id), _arg(action)
+            if not task_id:
+                raise ValueError("task_id is required.")
+            with CompanyClient(self.api_key, self.base_url) as client:
+                return control_company_task(
+                    client,
+                    task_id=task_id,
+                    action=action,
+                    tool_name="company_search_tool",
+                    control_tool_name="company_task_control_tool",
+                    enrich_tool_name="company_enrich_tool",
+                )
+        except Exception as e:
+            return str(e)
+
+    def _company_task(
+        self,
+        tool_name: str,
+        kind: str,
+        body: Optional[Dict[str, Any]],
+        idempotency_key: Optional[str],
+        timeout: Any,
+        task_id: Optional[str],
+    ) -> dict:
+        if timeout is None or not 0 <= timeout <= 1800:
+            raise ValueError("timeout must be between 0 and 1800 seconds.")
+        kwargs: Dict[str, Any] = {
+            "tool_name": tool_name,
+            "control_tool_name": "company_task_control_tool",
+            "timeout": timeout,
+            "poll_interval": self.poll_interval,
+        }
+        if task_id:
+            kwargs["task_id"] = task_id
+        else:
+            kwargs.update(kind=kind, body=body, idempotency_key=idempotency_key)
+        with CompanyClient(self.api_key, self.base_url) as client:
+            return run_company_task(client, **kwargs)
