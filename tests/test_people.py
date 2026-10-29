@@ -177,6 +177,10 @@ def test_people_functions_are_listed_with_short_descriptions():
         "web_search_tool",
         "people_search_tool",
         "people_profiles_tool",
+        "company_search_tool",
+        "company_enrich_tool",
+        "company_tasks_tool",
+        "company_task_control_tool",
     ]
     for tool in tools.values():
         # OpenAI rejects tool descriptions over 1024 characters.
@@ -197,8 +201,8 @@ def test_people_functions_are_listed_with_short_descriptions():
 def test_package_metadata():
     pyproject = (ROOT / "pyproject.toml").read_text()
     setup_py = (ROOT / "setup.py").read_text()
-    assert 'version = "0.1.0"' in pyproject
-    assert 'version="0.1.0"' in setup_py
+    assert 'version = "0.2.0"' in pyproject
+    assert 'version="0.2.0"' in setup_py
     for text in (pyproject, setup_py):
         # People Search must not need the unpublished desearch-py 1.4.0.
         assert "desearch-py>=1.0.0" in text
