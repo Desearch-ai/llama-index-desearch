@@ -325,6 +325,62 @@ def test_social_object_action_encodes_a_url_id_as_one_path_segment(spec, desearc
     assert desearch_api.requests[0]["path"] == path
 
 
+def test_youtube_and_reddit_list_actions_page_through_the_cursor_header(spec, desearch_api):
+    desearch_api.add(
+        "POST",
+        "/desearch/youtube/search",
+        200,
+        [{"id": "dQw4w9WgXcQ", "type": "video"}],
+        headers={"x-desearch-next-cursor": "eXQ=+/2"},
+    )
+    desearch_api.add(
+        "GET",
+        "/desearch/reddit/comments/1q6pxwn",
+        200,
+        [{"id": "c1", "depth": 0, "replies": [{"id": "c2", "depth": 1}]}],
+    )
+
+    first = spec.youtube_tool(action="search", query="bittensor", sort="popular")
+    spec.youtube_tool(
+        action="search", query="bittensor", sort="popular", cursor=first["next_cursor"]
+    )
+    tree = spec.reddit_tool(action="comments", id="1q6pxwn", cursor="rd-2")
+
+    assert first["next_cursor"] == "eXQ=+/2"
+    assert [r["json"] for r in desearch_api.requests[:2]] == [
+        {"query": "bittensor", "sort_by": "popular"},
+        {"query": "bittensor", "sort_by": "popular", "cursor": "eXQ=+/2"},
+    ]
+    # RedditComment.replies defaults to [], so the nested reply gets one too.
+    assert tree == {
+        "results": [
+            {"id": "c1", "depth": 0, "replies": [{"id": "c2", "depth": 1, "replies": []}]}
+        ],
+        "next_cursor": None,
+    }
+    assert desearch_api.requests[2]["query"] == {"cursor": "rd-2"}
+
+
+def test_threads_post_url_is_one_path_segment(spec, desearch_api):
+    path = "/desearch/threads/post/https:%2F%2Fwww.threads.com%2F@zuck%2Fpost%2FDK-BydcJHkF"
+    desearch_api.add(
+        "GET", path, 200, {"id": "1", "code": "DK-BydcJHkF", "comments": [], "threadItems": []}
+    )
+
+    result = spec.threads_tool(
+        action="post", id="https://www.threads.com/@zuck/post/DK-BydcJHkF"
+    )
+
+    assert result["code"] == "DK-BydcJHkF"
+    assert desearch_api.requests[0]["path"] == path
+
+
+def test_youtube_transcript_without_captions_is_returned_as_text(spec, desearch_api):
+    result = spec.youtube_tool(action="transcript", id="nocaptions1")
+
+    assert result == "HTTP 404: Not Found"
+
+
 def test_extract_returns_the_page_text(spec, desearch_api):
     desearch_api.add("GET", "/web/extract", 200, "Example Domain")
 

@@ -25,7 +25,14 @@ from desearch_py import (
     PeopleProfilesPage,
     PeopleResultsPage,
     PeopleTask,
+    RedditComment,
+    RedditPost,
+    RedditSubreddit,
     SearchApiResponse,
+    ThreadsPost,
+    ThreadsPostDetail,
+    ThreadsProfile,
+    ThreadsUser,
     TikTokComment,
     TikTokPost,
     TikTokProfile,
@@ -36,6 +43,11 @@ from desearch_py import (
     XRetweetersResponse,
     XTrendsResponse,
     XUserPostsResponse,
+    YouTubeChannel,
+    YouTubeComment,
+    YouTubeItem,
+    YouTubeTranscript,
+    YouTubeVideo,
 )
 
 from llama_index_desearch import tools as tools_module
@@ -124,6 +136,22 @@ RESPONSES = {
     "instagram_profile_posts": _page([InstagramMedia(id="m1")], "ig-2"),
     "instagram_comments": _page([InstagramComment(id="c1")], "ig-2"),
     "instagram_hashtag": _page([InstagramMedia(id="m2")], "ig-2"),
+    "youtube_search": _page([YouTubeItem(id="dQw4w9WgXcQ", type="video")], "yt-2"),
+    "youtube_video": YouTubeVideo(id="dQw4w9WgXcQ", title="t"),
+    "youtube_transcript": YouTubeTranscript(videoId="dQw4w9WgXcQ", text="hi"),
+    "youtube_comments": _page([YouTubeComment(id="c1", text="nice")], "yt-2"),
+    "youtube_channel": YouTubeChannel(handle="MrBeast"),
+    "youtube_channel_videos": _page([YouTubeItem(id="v2")], "yt-2"),
+    "reddit_search": _page([RedditPost(id="1q6pxwn")], "rd-2"),
+    "reddit_subreddit": RedditSubreddit(name="AskReddit"),
+    "reddit_subreddit_posts": _page([RedditPost(id="p2")], "rd-2"),
+    "reddit_post_by_id": RedditPost(id="1q6pxwn", title="t"),
+    "reddit_comments": _page([RedditComment(id="c1", replies=[{"id": "c2"}])], "rd-2"),
+    "threads_search": _page([ThreadsPost(id="1", code="DK-BydcJHkF")]),
+    "threads_search_users": _page([ThreadsUser(username="zuck")]),
+    "threads_profile": ThreadsProfile(username="zuck"),
+    "threads_profile_posts": _page([ThreadsPost(id="2")]),
+    "threads_post_by_id": ThreadsPostDetail(id="1", comments=[{"id": "r1"}]),
     "x_profile_search": TASK,
     "youtube_creator_search": TASK,
     "linkedin_profile_search": TASK,
@@ -412,6 +440,44 @@ SOCIAL_CALLS = [
      "instagram_comments", {"shortcode": "DY79rTVS6OK", "count": 2}),
     ("instagram_tool", "hashtag", {"tag": "ai"},
      "instagram_hashtag", {"tag": "ai"}),
+    ("youtube_tool", "search",
+     {"query": "bittensor", "type": "videos", "upload_date": "this_week",
+      "duration": "over_20_min", "sort": "popular"},
+     "youtube_search",
+     {"query": "bittensor", "type": "videos", "upload_date": "this_week",
+      "duration": "over_20_min", "sort_by": "popular"}),
+    ("youtube_tool", "video", {"id": "https://youtu.be/dQw4w9WgXcQ"},
+     "youtube_video", {"id": "https://youtu.be/dQw4w9WgXcQ"}),
+    ("youtube_tool", "transcript", {"id": "dQw4w9WgXcQ", "language": "en"},
+     "youtube_transcript", {"video_id": "dQw4w9WgXcQ", "language": "en"}),
+    ("youtube_tool", "comments", {"id": "dQw4w9WgXcQ", "order": "newest"},
+     "youtube_comments", {"video_id": "dQw4w9WgXcQ", "order": "newest"}),
+    ("youtube_tool", "channel", {"handle": "@MrBeast"},
+     "youtube_channel", {"handle": "@MrBeast"}),
+    ("youtube_tool", "channel_videos", {"handle": "@MrBeast", "sort": "latest"},
+     "youtube_channel_videos", {"handle": "@MrBeast", "sort": "latest"}),
+    ("reddit_tool", "search",
+     {"query": "bittensor", "sort": "comment_count", "timeframe": "month"},
+     "reddit_search", {"query": "bittensor", "sort": "comment_count", "timeframe": "month"}),
+    ("reddit_tool", "subreddit", {"name": "r/AskReddit"},
+     "reddit_subreddit", {"name": "AskReddit"}),
+    ("reddit_tool", "subreddit_posts", {"name": "AskReddit", "sort": "top", "timeframe": "week"},
+     "reddit_subreddit_posts", {"name": "AskReddit", "sort": "top", "timeframe": "week"}),
+    ("reddit_tool", "post", {"id": "1q6pxwn"},
+     "reddit_post_by_id", {"id": "1q6pxwn"}),
+    ("reddit_tool", "comments", {"id": "1q6pxwn"},
+     "reddit_comments", {"post_id": "1q6pxwn"}),
+    ("threads_tool", "search",
+     {"query": "bittensor", "start_date": "2026-01-01", "end_date": "2026-10-30"},
+     "threads_search", {"query": "bittensor", "start_date": "2026-01-01", "end_date": "2026-10-30"}),
+    ("threads_tool", "search_users", {"query": "zuck"},
+     "threads_search_users", {"query": "zuck"}),
+    ("threads_tool", "profile", {"username": "@zuck"},
+     "threads_profile", {"username": "zuck"}),
+    ("threads_tool", "profile_posts", {"username": "zuck"},
+     "threads_profile_posts", {"username": "zuck"}),
+    ("threads_tool", "post", {"id": "DK-BydcJHkF"},
+     "threads_post_by_id", {"id": "DK-BydcJHkF"}),
 ]
 
 PEOPLE_METHODS = {
@@ -468,7 +534,8 @@ def test_social_tools_cover_every_endpoint():
         for action in actions
     }
     assert covered == expected
-    assert len(expected) == 19
+    # 19 TikTok, Facebook and Instagram + 16 YouTube, Reddit and Threads routes.
+    assert len(expected) == 35
     for actions in _SOCIAL_ACTIONS.values():
         for action in actions.values():
             assert callable(getattr(RealDesearch, action.method, None)), action.method
@@ -488,6 +555,12 @@ def test_social_tools_cover_every_endpoint():
         ("instagram_tool", "profile_posts", {"username": "instagram"}, "instagram_profile_posts"),
         ("instagram_tool", "comments", {"id": "DY79rTVS6OK"}, "instagram_comments"),
         ("instagram_tool", "hashtag", {"tag": "ai"}, "instagram_hashtag"),
+        ("youtube_tool", "search", {"query": "ai"}, "youtube_search"),
+        ("youtube_tool", "comments", {"id": "dQw4w9WgXcQ"}, "youtube_comments"),
+        ("youtube_tool", "channel_videos", {"handle": "@MrBeast"}, "youtube_channel_videos"),
+        ("reddit_tool", "search", {"query": "ai"}, "reddit_search"),
+        ("reddit_tool", "subreddit_posts", {"name": "AskReddit"}, "reddit_subreddit_posts"),
+        ("reddit_tool", "comments", {"id": "1q6pxwn"}, "reddit_comments"),
     ],
 )
 def test_cursor_is_passed_through_unchanged(
@@ -550,6 +623,26 @@ def test_follow_a_cursor_page_by_page(spec, recorder):
         ("instagram_tool", {"action": "search", "query": "ai", "cursor": "c2"},
          "cursor does not apply to action 'search'. It takes: query, count."),
         ("instagram_tool", {"action": "comments"}, "id (for action comments) is required."),
+        ("youtube_tool", {"action": "channel"}, "handle (for action channel) is required."),
+        ("youtube_tool", {"action": "video", "id": "x", "cursor": "c2"},
+         "cursor does not apply to action 'video'. It takes: id."),
+        ("youtube_tool", {"action": "search", "query": "ai", "type": "music"},
+         "type for action 'search' must be one of: videos, shorts, channels, playlists."),
+        ("youtube_tool", {"action": "search", "query": "ai", "sort": "latest"},
+         "sort for action 'search' must be one of: relevance, popular."),
+        ("youtube_tool", {"action": "channel_videos", "handle": "h", "sort": "relevance"},
+         "sort for action 'channel_videos' must be one of: latest, popular."),
+        ("youtube_tool", {"action": "comments", "id": "x", "order": "oldest"},
+         "order for action 'comments' must be one of: top, newest."),
+        ("reddit_tool", {"action": "search", "query": "ai", "sort": "hot"},
+         "sort for action 'search' must be one of: relevance, new, top, comment_count."),
+        ("reddit_tool", {"action": "subreddit_posts", "name": "x", "timeframe": "decade"},
+         "timeframe for action 'subreddit_posts' must be one of: all, day, week, month, year."),
+        ("reddit_tool", {"action": "subreddit"}, "name (for action subreddit) is required."),
+        ("threads_tool", {"action": "search", "query": "ai", "start_date": "01/02/2026"},
+         "start_date must be a date in YYYY-MM-DD format."),
+        ("threads_tool", {"action": "profile_posts", "username": "zuck", "query": "x"},
+         "query does not apply to action 'profile_posts'. It takes: username."),
     ],
 )
 def test_social_arguments_are_checked_before_any_call(
@@ -731,7 +824,7 @@ def test_every_spec_function_is_a_short_described_tool():
     tools = _tools(DesearchToolSpec(api_key="test-key"))
 
     assert list(tools) == DesearchToolSpec.spec_functions
-    assert len(tools) == 20
+    assert len(tools) == 23
     for name, tool in tools.items():
         # OpenAI rejects tool descriptions over 1024 characters.
         assert len(tool.metadata.description) <= 1024, name
@@ -741,7 +834,14 @@ def test_every_spec_function_is_a_short_described_tool():
     tiktok = tools["tiktok_tool"].metadata.get_parameters_dict()
     assert tiktok["properties"]["action"]["enum"] == list(_SOCIAL_ACTIONS["tiktok"])
     assert tiktok["required"] == ["action"]
-    for name in ("tiktok_tool", "facebook_tool", "instagram_tool"):
+    for name in (
+        "tiktok_tool",
+        "facebook_tool",
+        "instagram_tool",
+        "youtube_tool",
+        "reddit_tool",
+        "threads_tool",
+    ):
         description = tools[name].metadata.description
         assert "next_cursor" in description
         for action in _SOCIAL_ACTIONS[name[: -len("_tool")]]:

@@ -1,10 +1,10 @@
 # LlamaIndex Tools Integration: Desearch
 
-This tool connects to Desearch so your agent can search the web, X (Twitter), TikTok, Facebook and Instagram, read web pages, and find people.
+This tool connects to Desearch so your agent can search the web, X (Twitter), TikTok, Facebook, Instagram, YouTube, Reddit and Threads, read web pages, and find people.
 
 To begin, you need to obtain an API key from the Desearch developer dashboard.
 
-> 0.2.0 needs `desearch-py>=1.8.0`, which is not on PyPI yet. Until it is, install desearch-py 1.8.0 from source before this package.
+> 0.3.0 needs `desearch-py>=1.11.0`, which is not on PyPI yet. Until it is, install desearch-py 1.11.0 from source before this package.
 
 ## Usage
 
@@ -52,6 +52,9 @@ agent.chat(
 | `tiktok_tool` | TikTok search, video, profile, profile videos, comments, hashtag, trending | `/desearch/tiktok/*` (7 routes) |
 | `facebook_tool` | Facebook Ad Library search, post, page, page posts, comments, hashtag | `/desearch/facebook/*` (6 routes) |
 | `instagram_tool` | Instagram profile search, post, profile, profile posts, comments, hashtag | `/desearch/instagram/*` (6 routes) |
+| `youtube_tool` | YouTube search, video, transcript, comments, channel, channel videos | `/desearch/youtube/*` (6 routes) |
+| `reddit_tool` | Reddit search, subreddit, subreddit posts, post, comment tree | `/desearch/reddit/*` (5 routes) |
+| `threads_tool` | Threads post search, account search, profile, profile posts, post with replies | `/desearch/threads/*` (5 routes) |
 | `people_search_tool` | Find people on X, LinkedIn, YouTube or TikTok from a description. Billed; takes 1-5 minutes | `POST /desearch/people/search/{platform}` |
 | `people_profiles_tool` | List the people your earlier People Searches found. Free | `GET /desearch/people/profiles` |
 
@@ -122,6 +125,45 @@ print(len(posts), "posts")
 
 `x_post_retweeters_tool` and `x_user_posts_tool` paginate the same way, with `next_cursor` in the returned `dict`.
 
+## YouTube, Reddit and Threads
+
+`youtube_tool`, `reddit_tool` and `threads_tool` work the same way: an `action`, only the arguments it uses, and `{"results": [...], "next_cursor": ...}` for list actions. They take no `count`; a page is whatever the platform returns. Each call is billed as one request, including an empty page; a 404 and a 422 are free.
+
+| Tool | `action` | Arguments | Paginated |
+| --- | --- | --- | --- |
+| `youtube_tool` | `search` | `query`, `type`, `upload_date`, `duration`, `sort` (`relevance`/`popular`), `cursor` | yes |
+| | `video` | `id` (video ID or URL) | |
+| | `transcript` | `id`, `language` | |
+| | `comments` | `id`, `order` (`top`/`newest`), `cursor` | yes |
+| | `channel` | `handle` (with or without `@`, or `UC…` ID) | |
+| | `channel_videos` | `handle`, `sort` (`latest`/`popular`), `cursor` | yes |
+| `reddit_tool` | `search` | `query`, `sort` (`relevance`/`new`/`top`/`comment_count`), `timeframe`, `cursor` | yes |
+| | `subreddit` | `name` (case-sensitive, without `r/`) | |
+| | `subreddit_posts` | `name`, `sort` (`best`/`hot`/`new`/`top`/`rising`), `timeframe`, `cursor` | yes |
+| | `post` | `id` (post ID or URL) | |
+| | `comments` | `id`, `cursor` | yes |
+| `threads_tool` | `search` | `query`, `start_date`, `end_date` (`YYYY-MM-DD`) | no |
+| | `search_users` | `query` | no |
+| | `profile` | `username` | |
+| | `profile_posts` | `username` | no |
+| | `post` | `id` (URL or shortcode) | |
+
+`type` is `videos`, `shorts`, `channels` or `playlists`; `upload_date` is `today`, `this_week`, `this_month` or `this_year`; `duration` is `under_3_min`, `between_3_and_20_min` or `over_20_min`; `timeframe` is `all`, `day`, `week`, `month` or `year`. A value outside its set is refused before any request. A leading `r/` on a subreddit name is removed. `transcript` returns `HTTP 404: ...` when the video has no captions. `reddit_tool` `comments` returns a tree: each comment's `replies` holds the replies Reddit loaded. `threads_tool` `post` returns the post with its replies in `comments` and the author's continuation posts in `threadItems`.
+
+```python
+videos = desearch_tool.youtube_tool(action="search", query="bittensor", type="videos")
+transcript = desearch_tool.youtube_tool(action="transcript", id=videos["results"][0]["id"], language="en")
+
+page = desearch_tool.reddit_tool(action="subreddit_posts", name="AskReddit", sort="top", timeframe="week")
+if page["next_cursor"]:
+    page = desearch_tool.reddit_tool(
+        action="subreddit_posts", name="AskReddit", sort="top", timeframe="week",
+        cursor=page["next_cursor"],
+    )
+
+post = desearch_tool.threads_tool(action="post", id="https://www.threads.com/@zuck/post/DK-BydcJHkF")
+```
+
 ## People Search
 
 [People Search](https://www.desearch.ai/docs/guide/apis/people-search) finds people on `x`, `linkedin`, `youtube` or `tiktok` from a plain-language description and returns them as compact profiles: name, handle, url, platform, audience, location, fit score, why they matched, contacts and links.
@@ -189,4 +231,11 @@ pytest tests
 ```bash
 DESEARCH_API_KEY=... python scripts/e2e-full-coverage.py
 DESEARCH_API_KEY=... python scripts/e2e-full-coverage.py --base-url https://api.desearch.ai --with-people
+```
+
+`scripts/e2e-youtube-reddit-threads.py` calls every `youtube_tool`, `reddit_tool` and `threads_tool` action once and reads page 2 of each paged action (about 23 requests at $0.00207 each). `--key-env` names the variable that holds the key:
+
+```bash
+DESEARCH_API_KEY=... python scripts/e2e-youtube-reddit-threads.py
+python scripts/e2e-youtube-reddit-threads.py --base-url https://api-dev.desearch.ai --key-env DESEARCH_DEV_API_KEY
 ```

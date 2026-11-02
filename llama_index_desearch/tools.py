@@ -120,6 +120,11 @@ FacebookAction = Literal[
 InstagramAction = Literal[
     "search", "post", "profile", "profile_posts", "comments", "hashtag"
 ]
+YouTubeAction = Literal[
+    "search", "video", "transcript", "comments", "channel", "channel_videos"
+]
+RedditAction = Literal["search", "subreddit", "subreddit_posts", "post", "comments"]
+ThreadsAction = Literal["search", "search_users", "profile", "profile_posts", "post"]
 
 
 class _SocialAction(NamedTuple):
@@ -132,10 +137,15 @@ class _SocialAction(NamedTuple):
     renames: Tuple[Tuple[str, str], ...] = ()
     # True when the route returns a list of items (one page).
     returns_list: bool = False
+    # Tool argument name -> the values it accepts, where there is a fixed set.
+    choices: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
 
 
-# Every TikTok, Facebook and Instagram route, by tool and action. Only actions
-# with "cursor" in ``optional`` paginate.
+_TIMEFRAMES = ("all", "day", "week", "month", "year")
+
+# Every TikTok, Facebook, Instagram, YouTube, Reddit and Threads route, by tool
+# and action. Only actions with "cursor" in ``optional`` paginate. YouTube,
+# Reddit and Threads take no count: a page is whatever the platform returns.
 _SOCIAL_ACTIONS: Dict[str, Dict[str, _SocialAction]] = {
     "tiktok": {
         "search": _SocialAction(
@@ -206,6 +216,89 @@ _SOCIAL_ACTIONS: Dict[str, Dict[str, _SocialAction]] = {
         "hashtag": _SocialAction(
             "instagram_hashtag", ("tag",), ("count", "cursor"), returns_list=True
         ),
+    },
+    "youtube": {
+        "search": _SocialAction(
+            "youtube_search",
+            ("query",),
+            ("type", "upload_date", "sort", "duration", "cursor"),
+            renames=(("sort", "sort_by"),),
+            returns_list=True,
+            choices=(
+                ("type", ("videos", "shorts", "channels", "playlists")),
+                ("upload_date", ("today", "this_week", "this_month", "this_year")),
+                ("sort", ("relevance", "popular")),
+                ("duration", ("under_3_min", "between_3_and_20_min", "over_20_min")),
+            ),
+        ),
+        "video": _SocialAction("youtube_video", ("id",)),
+        "transcript": _SocialAction(
+            "youtube_transcript",
+            ("id",),
+            ("language",),
+            renames=(("id", "video_id"),),
+        ),
+        "comments": _SocialAction(
+            "youtube_comments",
+            ("id",),
+            ("order", "cursor"),
+            renames=(("id", "video_id"),),
+            returns_list=True,
+            choices=(("order", ("top", "newest")),),
+        ),
+        "channel": _SocialAction("youtube_channel", ("handle",)),
+        "channel_videos": _SocialAction(
+            "youtube_channel_videos",
+            ("handle",),
+            ("sort", "cursor"),
+            returns_list=True,
+            choices=(("sort", ("latest", "popular")),),
+        ),
+    },
+    "reddit": {
+        "search": _SocialAction(
+            "reddit_search",
+            ("query",),
+            ("sort", "timeframe", "cursor"),
+            returns_list=True,
+            choices=(
+                ("sort", ("relevance", "new", "top", "comment_count")),
+                ("timeframe", _TIMEFRAMES),
+            ),
+        ),
+        "subreddit": _SocialAction("reddit_subreddit", ("name",)),
+        "subreddit_posts": _SocialAction(
+            "reddit_subreddit_posts",
+            ("name",),
+            ("sort", "timeframe", "cursor"),
+            returns_list=True,
+            choices=(
+                ("sort", ("best", "hot", "new", "top", "rising")),
+                ("timeframe", _TIMEFRAMES),
+            ),
+        ),
+        "post": _SocialAction("reddit_post_by_id", ("id",)),
+        "comments": _SocialAction(
+            "reddit_comments",
+            ("id",),
+            ("cursor",),
+            renames=(("id", "post_id"),),
+            returns_list=True,
+        ),
+    },
+    "threads": {
+        # Threads never pages: no action takes a cursor.
+        "search": _SocialAction(
+            "threads_search", ("query",), ("start_date", "end_date"), returns_list=True
+        ),
+        "search_users": _SocialAction(
+            "threads_search_users", ("query",), returns_list=True
+        ),
+        "profile": _SocialAction("threads_profile", ("username",)),
+        "profile_posts": _SocialAction(
+            "threads_profile_posts", ("username",), returns_list=True
+        ),
+        "post": _SocialAction("threads_post_by_id", ("id",)),
     },
 }
 
@@ -317,7 +410,7 @@ def _check_date(name: str, value: Any) -> None:
 
 
 class DesearchToolSpec(BaseToolSpec):
-    """Desearch tool spec: AI search, web, X (Twitter), TikTok, Facebook, Instagram and People Search.
+    """Desearch tool spec: AI search, web, X (Twitter), TikTok, Facebook, Instagram, YouTube, Reddit, Threads and People Search.
 
     Every function is synchronous and returns plain dicts and lists, or an
     error string (``HTTP <status>: <detail>``) instead of raising. It runs the
@@ -347,6 +440,9 @@ class DesearchToolSpec(BaseToolSpec):
         "tiktok_tool",
         "facebook_tool",
         "instagram_tool",
+        "youtube_tool",
+        "reddit_tool",
+        "threads_tool",
     ]
 
     def __init__(self, api_key: str) -> None:
@@ -911,10 +1007,20 @@ class DesearchToolSpec(BaseToolSpec):
                 not isinstance(region, str) or not re.fullmatch(r"[A-Za-z]{2}", region)
             ):
                 raise ValueError("region must be a two-letter country code, e.g. US.")
+            for name, allowed in spec.choices:
+                if values.get(name) is not None and values[name] not in allowed:
+                    raise ValueError(
+                        f"{name} for action {action!r} must be one of: {', '.join(allowed)}."
+                    )
+            _check_date("start_date", values.get("start_date"))
+            _check_date("end_date", values.get("end_date"))
             if values.get("username"):
                 values["username"] = values["username"].lstrip("@")
             if values.get("tag"):
                 values["tag"] = values["tag"].lstrip("#")
+            # A subreddit name without r/. A YouTube handle keeps its @.
+            if isinstance(values.get("name"), str) and values["name"].startswith("r/"):
+                values["name"] = values["name"][2:]
 
             renames = dict(spec.renames)
             kwargs = {
@@ -1094,6 +1200,170 @@ class DesearchToolSpec(BaseToolSpec):
             tag=tag,
             count=count,
             cursor=cursor,
+        )
+
+    # ─── YouTube, Reddit and Threads ─────────────────────────────────────────
+    #
+    # Each call is billed as one request, including an empty page.
+
+    def youtube_tool(
+        self,
+        action: YouTubeAction = Field(description="What to read; see the tool description."),
+        query: Optional[str] = Field(
+            default=None,
+            description='search: keywords. intitle:"..." matches titles more strictly.',
+        ),
+        id: Optional[str] = Field(
+            default=None,
+            description="video, transcript and comments: the video or Short ID, or its URL.",
+        ),
+        handle: Optional[str] = Field(
+            default=None,
+            description="channel and channel_videos: handle (with or without @) or channel ID (UC...).",
+        ),
+        type: Optional[str] = Field(
+            default=None,
+            description="search: videos, shorts, channels or playlists (default mixed).",
+        ),
+        upload_date: Optional[str] = Field(
+            default=None, description="search: today, this_week, this_month or this_year."
+        ),
+        duration: Optional[str] = Field(
+            default=None,
+            description="search: under_3_min, between_3_and_20_min or over_20_min.",
+        ),
+        sort: Optional[str] = Field(
+            default=None,
+            description="search: relevance or popular. channel_videos: latest (default) or popular.",
+        ),
+        order: Optional[str] = Field(default=None, description="comments: top or newest."),
+        language: Optional[str] = Field(
+            default=None,
+            description="transcript: caption language code such as en (default track if unset).",
+        ),
+        cursor: Optional[str] = Field(
+            default=None,
+            description=(
+                "next_cursor from the previous page of the same action and arguments. "
+                "Only search, comments and channel_videos."
+            ),
+        ),
+    ) -> Union[dict, str]:
+        """
+        Read public YouTube data. Pick an action; set only its arguments:
+        search (query, type, upload_date, duration, sort, cursor): videos, Shorts, channels, playlists.
+        video (id): one video.
+        transcript (id, language): captions as text and timed segments.
+        comments (id, order, cursor): top-level comments.
+        channel (handle): a channel.
+        channel_videos (handle, sort, cursor): a channel's uploads.
+
+        List actions return {"results": [...], "next_cursor": ...}; repeat with cursor=next_cursor for more (null on the last page). Errors return a string.
+        """
+        return self._social(
+            "youtube",
+            action,
+            query=query,
+            id=id,
+            handle=handle,
+            type=type,
+            upload_date=upload_date,
+            duration=duration,
+            sort=sort,
+            order=order,
+            language=language,
+            cursor=cursor,
+        )
+
+    def reddit_tool(
+        self,
+        action: RedditAction = Field(description="What to read; see the tool description."),
+        query: Optional[str] = Field(default=None, description="search: keywords."),
+        name: Optional[str] = Field(
+            default=None,
+            description="subreddit and subreddit_posts: case-sensitive name without r/ (AskReddit).",
+        ),
+        id: Optional[str] = Field(
+            default=None,
+            description="post and comments: post ID (1q6pxwn, with or without t3_) or URL.",
+        ),
+        sort: Optional[str] = Field(
+            default=None,
+            description=(
+                "search: relevance, new, top or comment_count. "
+                "subreddit_posts: best, hot, new, top or rising."
+            ),
+        ),
+        timeframe: Optional[str] = Field(
+            default=None,
+            description="search and subreddit_posts: all, day, week, month or year (for top).",
+        ),
+        cursor: Optional[str] = Field(
+            default=None,
+            description=(
+                "next_cursor from the previous page of the same action and arguments. "
+                "Only search, subreddit_posts and comments."
+            ),
+        ),
+    ) -> Union[dict, str]:
+        """
+        Read public Reddit data. Pick an action; set only its arguments:
+        search (query, sort, timeframe, cursor): posts across all subreddits.
+        subreddit (name): a subreddit's description, rules and weekly activity.
+        subreddit_posts (name, sort, timeframe, cursor): a subreddit's posts.
+        post (id): one post, without comments.
+        comments (id, cursor): a post's comments as a tree (replies inside each comment).
+
+        List actions return {"results": [...], "next_cursor": ...}. For more, repeat the call with cursor=next_cursor (null on the last page). subreddit and post return one object; errors return a string.
+        """
+        return self._social(
+            "reddit",
+            action,
+            query=query,
+            name=name,
+            id=id,
+            sort=sort,
+            timeframe=timeframe,
+            cursor=cursor,
+        )
+
+    def threads_tool(
+        self,
+        action: ThreadsAction = Field(description="What to read; see the tool description."),
+        query: Optional[str] = Field(
+            default=None, description="search: keywords. search_users: username or name."
+        ),
+        username: Optional[str] = Field(
+            default=None, description="profile and profile_posts: username, without @."
+        ),
+        id: Optional[str] = Field(
+            default=None, description="post: the post URL or shortcode."
+        ),
+        start_date: Optional[str] = Field(
+            default=None, description="search: only posts on or after this date (YYYY-MM-DD)."
+        ),
+        end_date: Optional[str] = Field(
+            default=None, description="search: only posts on or before this date (YYYY-MM-DD)."
+        ),
+    ) -> Union[dict, str]:
+        """
+        Read public Threads data. Pick an action; set only its arguments:
+        search (query, start_date, end_date): posts for keywords.
+        search_users (query): accounts by username or name.
+        profile (username): a profile's bio, followers and links.
+        profile_posts (username): a user's latest public posts.
+        post (id): one post with its replies (comments) and the author's thread continuation (threadItems).
+
+        List actions return {"results": [...], "next_cursor": null}: Threads returns one page. profile and post return one object; errors return a string.
+        """
+        return self._social(
+            "threads",
+            action,
+            query=query,
+            username=username,
+            id=id,
+            start_date=start_date,
+            end_date=end_date,
         )
 
     # ─── People Search ───────────────────────────────────────────────────────

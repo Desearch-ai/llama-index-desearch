@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Note: the latest release on PyPI is 0.0.2. Versions 0.0.3 and 0.1.0 were
 > never released; their changes are part of 0.2.0.
 
+## [0.3.0] - unreleased
+
+> **Do not release yet.** 0.3.0 needs `desearch-py>=1.11.0`, the first
+> desearch-py with the YouTube, Reddit and Threads methods, which is not on
+> PyPI yet. It is stacked on 0.2.0 (llama-index-desearch#5); both ship
+> together. The publish workflow uploads on every push to `main`, so merge to
+> `main` only after desearch-py 1.11.0 is published.
+
+### Added
+
+- `youtube_tool`: `search` (`type`, `upload_date`, `duration`, `sort`,
+  `cursor`), `video`, `transcript` (`language`), `comments` (`order`,
+  `cursor`), `channel`, `channel_videos` (`sort`, `cursor`).
+- `reddit_tool`: `search` (`sort`, `timeframe`, `cursor`), `subreddit`,
+  `subreddit_posts` (`sort`, `timeframe`, `cursor`), `post`, `comments`
+  (`cursor`; a comment tree).
+- `threads_tool`: `search` (`start_date`, `end_date`), `search_users`,
+  `profile`, `profile_posts`, `post` (with replies and thread continuation).
+- List actions return `{"results": [...], "next_cursor": ...}` like the other
+  social tools; the cursor is the `x-desearch-next-cursor` header. Threads
+  returns one page. These routes take no `count`.
+- Arguments with a fixed set of values are checked per action before any
+  request (Reddit `sort` differs between `search` and `subreddit_posts`), and
+  Threads dates must be `YYYY-MM-DD`.
+- `scripts/e2e-youtube-reddit-threads.py`, a live smoke test of the three
+  tools (`--base-url`, `--key-env`).
+
+### Changed
+
+- Requires `desearch-py>=1.11.0,<2.0.0` (was `>=1.8.0`).
+
 ## [0.2.0] - unreleased
 
 > **Do not release yet.** 0.2.0 needs `desearch-py>=1.8.0`, which is not on
